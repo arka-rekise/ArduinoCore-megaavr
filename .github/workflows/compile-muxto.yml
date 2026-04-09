@@ -1,6 +1,5 @@
 name: Compile MuxTO
 
-# See: https://docs.github.com/en/free-pro-team@latest/actions/reference/events-that-trigger-workflows
 on:
   push:
     paths:
@@ -11,7 +10,6 @@ on:
       - ".github/workflows/compile-muxto.yml"
       - "firmwares/MuxTO/**"
   schedule:
-    # Run every Tuesday at 8 AM UTC to catch breakage caused by changes to external resources (libraries, platforms).
     - cron: "0 8 * * TUE"
   workflow_dispatch:
   repository_dispatch:
@@ -27,73 +25,136 @@ jobs:
 
     strategy:
       fail-fast: false
-
       matrix:
         board:
-          - fqbn: arduino:samd:muxto:float=default,config=enabled,clock=internal_usb,timer=timer_732Hz,bootloader=4kb,serial=two_uart,usb=cdc
-            platforms: |
-              # Install MattairTech_Arduino:samd via Boards Manager for the toolchain
-              - name: MattairTech_Arduino:samd
-                source-url: https://www.mattairtech.com/software/arduino/package_MattairTech_index.json
-                # This needs to match with the version of MattairTech_Arduino:samd the Arduino fork is based on in order to get the right tool versions
-                version: 1.6.17
-              # Install officila samd version for compiler support
-              - name: arduino:samd
-              # Install the platform with MuxTO support
-              - name: arduino:samd
-                source-url: https://github.com/arduino/ArduinoCore-samd.git
-                version: muxto
+          - fqbn: MattairTech_Arduino:samd:d11d14as:float=default,config=enabled,clock=internal_usb,timer=timer_732Hz,bootloader=4kb,serial=two_uart,usb=cdc
 
     steps:
       - name: Set environment variables
         run: |
-          # See: https://docs.github.com/en/actions/reference/workflow-commands-for-github-actions#setting-an-environment-variable
           echo "BINARY_OUTPUT_PATH=${{ runner.temp }}/output" >> "$GITHUB_ENV"
-          echo "SKETCHES_REPORTS_PATH=${{ runner.temp }}/sketches-reports" >> "$GITHUB_ENV"
 
       - name: Checkout repository
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
-      - name: Compile firmware
-        uses: arduino/compile-sketches@v1
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          fqbn: ${{ matrix.board.fqbn }}
-          platforms: ${{ matrix.board.platforms }}
-          libraries: |
-            -
-          sketch-paths: |
-            - firmwares/MuxTO
-          cli-compile-flags: |
-            - --output-dir=${{ env.BINARY_OUTPUT_PATH }}
-          enable-deltas-report: true
-          sketches-report-path: ${{ env.SKETCHES_REPORTS_PATH }}
+      - name: Install arduino-cli
+        run: |
+          ARDUINO_CLI_VERSION="1.1.1"
+          curl -fsSL "https://github.com/arduino/arduino-cli/releases/download/v${ARDUINO_CLI_VERSION}/arduino-cli_${ARDUINO_CLI_VERSION}_Linux_64bit.tar.gz" \
+            -o arduino-cli.tar.gz
+          tar -xzf arduino-cli.tar.gz arduino-cli
+          sudo mv arduino-cli /usr/local/bin/arduino-cli
+          sudo chmod +x /usr/local/bin/arduino-cli
+          arduino-cli version
+          arduino-cli config init --overwrite
+
+      - name: Install official arduino:samd (for tools)
+        run: |
+          arduino-cli core update-index
+          arduino-cli core install arduino:samd
+
+      - name: Install MattairTech ArduinoCore-samd
+        run: |
+          MT_HW="$HOME/Arduino/hardware/MattairTech_Arduino/samd"
+          mkdir -p "$(dirname "$MT_HW")"
+          git clone --depth 1 \
+            https://github.com/mattairtech/ArduinoCore-samd.git \
+            "$MT_HW"
+
+      - name: Install MattairTech CMSIS-Atmel from GitHub
+        run: |
+          CMSIS_ATMEL_DIR="$HOME/mattairtech-cmsis-atmel"
+          git clone --depth 1 \
+            https://github.com/mattairtech/CMSIS-Atmel.git \
+            "$CMSIS_ATMEL_DIR"
+          echo "--- Verifying sam.h ---"
+          find "$CMSIS_ATMEL_DIR" -name "sam.h" | head -3
+
+      - name: Create platform.local.txt with resolved CMSIS paths
+        run: |
+          MT_HW="$HOME/Arduino/hardware/MattairTech_Arduino/samd"
+          ARDUINO_TOOLS="$HOME/.arduino15/packages/arduino/tools"
+
+          CMSIS_INCLUDE=$(find "$ARDUINO_TOOLS/CMSIS" -type d -name "Include" -path "*/CMSIS/Include" | head -1)
+          echo "CMSIS Include: $CMSIS_INCLUDE"
+
+          CMSIS_LIB=$(find "$ARDUINO_TOOLS/CMSIS" -type d -name "GCC" -path "*/CMSIS/Lib/GCC" | head -1)
+          echo "CMSIS Lib: $CMSIS_LIB"
+
+          CMSIS_ATMEL_DEVICE=$(find "$HOME/mattairtech-cmsis-atmel" -type d -name "ATMEL" -path "*/Device/ATMEL" | head -1)
+          echo "CMSIS-Atmel Device: $CMSIS_ATMEL_DEVICE"
+
+          ls "$CMSIS_ATMEL_DEVICE/sam.h" || { echo "ERROR: sam.h not found!"; exit 1; }
+          ls "$CMSIS_ATMEL_DEVICE/samd11/include/samd11.h" || { echo "ERROR: SAMD11 headers missing!"; exit 1; }
+
+          cat > "$MT_HW/platform.local.txt" << EOF
+          compiler.arm.cmsis.c.flags="-I${CMSIS_INCLUDE}/" "-I${CMSIS_ATMEL_DEVICE}/"
+          compiler.arm.cmsis.ldflags="-L${CMSIS_LIB}/" -larm_cortexM0l_math
+          EOF
+
+          sed -i 's/^[[:space:]]*//' "$MT_HW/platform.local.txt"
+
+          echo "--- platform.local.txt ---"
+          cat "$MT_HW/platform.local.txt"
+
+      - name: Link toolchain for MattairTech
+        run: |
+          ARDUINO_TOOLS="$HOME/.arduino15/packages/arduino/tools"
+          MT_TOOLS="$HOME/.arduino15/packages/MattairTech_Arduino/tools"
+          mkdir -p "$MT_TOOLS"
+
+          ARDUINO_GCC=$(find "$ARDUINO_TOOLS/arm-none-eabi-gcc" -maxdepth 1 -mindepth 1 -type d | head -1)
+          echo "Arduino gcc: $ARDUINO_GCC"
+
+          mkdir -p "$MT_TOOLS/arm-none-eabi-gcc"
+          for ver in "current" "4.8.3-2014q1" "7-2017q4"; do
+            ln -sfn "$ARDUINO_GCC" "$MT_TOOLS/arm-none-eabi-gcc/$ver"
+          done
+
+          for tool in bossac openocd; do
+            [ -d "$ARDUINO_TOOLS/$tool" ] && ln -sfn "$ARDUINO_TOOLS/$tool" "$MT_TOOLS/$tool"
+          done
+
+          echo "--- Verify gcc ---"
+          "$MT_TOOLS/arm-none-eabi-gcc/7-2017q4/bin/arm-none-eabi-gcc" --version | head -1
+
+      - name: Verify d11d14as board
+        run: |
+          arduino-cli board listall 2>&1 | grep -i d11d14as
+          echo "Board found"
+
+      - name: Create output directory
+        run: mkdir -p "${{ env.BINARY_OUTPUT_PATH }}"
+
+      - name: Compile MuxTO firmware
+        run: |
+          arduino-cli compile \
+            --fqbn "${{ matrix.board.fqbn }}" \
+            --output-dir "${{ env.BINARY_OUTPUT_PATH }}" \
+            --verbose \
+            firmwares/MuxTO
+
+      - name: List compiled output
+        run: ls -lh "${{ env.BINARY_OUTPUT_PATH }}"
 
       - name: Save firmware binary as workflow artifact
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4
         with:
           if-no-files-found: error
           path: ${{ env.BINARY_OUTPUT_PATH }}/${{ env.BINARY_FILENAME }}
           name: ${{ env.BINARY_ARTIFACT_NAME }}
 
-      - name: Save sketches report as workflow artifact
-        uses: actions/upload-artifact@v2
-        with:
-          if-no-files-found: error
-          path: ${{ env.SKETCHES_REPORTS_PATH }}
-          name: sketches-reports
-
   size:
     name: Check firmware size
     needs: build
     runs-on: ubuntu-latest
+
     steps:
       - name: Download binary artifact
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v4
         with:
           name: ${{ env.BINARY_ARTIFACT_NAME }}
 
-      # The normal size check done by Arduino CLI is not working correctly, so it's necessary to check the size directly
       - name: Check firmware binary size
         run: |
           BINARY_SIZE="$(stat --printf="%s" "${{ github.workspace }}/${{ env.BINARY_FILENAME }}")"
@@ -102,4 +163,4 @@ jobs:
           if [[ $BINARY_SIZE -gt $MAX_BINARY_SIZE ]]; then
             echo "::error::Binary size of $BINARY_SIZE B exceeds the available memory ($MAX_BINARY_SIZE B)"
             exit 1
-          fi
+          fi  
