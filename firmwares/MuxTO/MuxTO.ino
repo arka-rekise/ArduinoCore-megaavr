@@ -163,22 +163,36 @@ void loop() {
       updi_mode_end = 0;
     }
 
+    static bool firstUsbAttachIgnored = false;
+
     if (Serial.baud() != baudrate || serialNeedReconfiguration || Serial.dtr() != dtr) {
-      dtr = Serial.dtr();
-      if (Serial.dtr() == 1) {
-        baudrate = Serial.baud();
-        Serial1.end();
-        if (baudrate != 1200) {
-          Serial1.begin(baudrate, serial_mode);
-          serialNeedReconfiguration = false;
-          // Request reset
-          UPDI::stcs(UPDI::reg::ASI_Reset_Request, UPDI::RESET_ON);
-          // Release reset (System remains in reset state until released)
-          UPDI::stcs(UPDI::reg::ASI_Reset_Request, UPDI::RESET_OFF);
-        }
-      }
-    }
-    return;
+     int8_t old_dtr = dtr;
+     dtr = Serial.dtr();
+
+     // Handle serial reconfiguration normally
+     baudrate = Serial.baud();
+     Serial1.end();
+
+     if (baudrate != 1200) {
+       Serial1.begin(baudrate, serial_mode);
+       serialNeedReconfiguration = false;
+     }
+
+     // Reset only on REAL DTR toggle after first attach
+     if (old_dtr == 0 && dtr == 1 && baudrate != 1200) {
+
+    // Ignore first DTR high after USB plug
+       if (!firstUsbAttachIgnored) {
+         firstUsbAttachIgnored = true;
+       } else {
+         // Manual reset pulse for later serial reconnects only
+         UPDI::stcs(UPDI::reg::ASI_Reset_Request, UPDI::RESET_ON);
+         delay(2);
+         UPDI::stcs(UPDI::reg::ASI_Reset_Request, UPDI::RESET_OFF);
+       }
+     }
+   }
+return;
   }
 
   if (updi_mode == true) {
