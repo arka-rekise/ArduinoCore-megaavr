@@ -17,7 +17,7 @@ on:
   repository_dispatch:
 
 env:
-  BINARY_FILENAME: MuxTO.ino.bin
+  BINARY_FILENAME: MuxTO.bin
   BINARY_ARTIFACT_NAME: MuxTO
 
 jobs:
