@@ -1,6 +1,5 @@
 name: Compile MuxTO
 
-# See: https://docs.github.com/en/free-pro-team@latest/actions/reference/events-that-trigger-workflows
 on:
   push:
     paths:
@@ -11,7 +10,6 @@ on:
       - ".github/workflows/compile-muxto.yml"
       - "firmwares/MuxTO/**"
   schedule:
-    # Run every Tuesday at 8 AM UTC to catch breakage caused by changes to external resources (libraries, platforms).
     - cron: "0 8 * * TUE"
   workflow_dispatch:
   repository_dispatch:
@@ -27,39 +25,54 @@ jobs:
 
     strategy:
       fail-fast: false
-
       matrix:
         board:
           - fqbn: arduino:samd:muxto:float=default,config=enabled,clock=internal_usb,timer=timer_732Hz,bootloader=4kb,serial=two_uart,usb=cdc
-            platforms: |
-              # Install MattairTech_Arduino:samd via Boards Manager for the toolchain
-              - name: MattairTech_Arduino:samd
-                source-url: https://www.mattairtech.com/software/arduino/package_MattairTech_index.json
-                # This needs to match with the version of MattairTech_Arduino:samd the Arduino fork is based on in order to get the right tool versions
-                version: 1.6.17
-              # Install officila samd version for compiler support
-              - name: arduino:samd
-              # Install the platform with MuxTO support
-              - name: arduino:samd
-                source-url: https://github.com/arduino/ArduinoCore-samd.git
-                version: muxto
 
     steps:
       - name: Set environment variables
         run: |
-          # See: https://docs.github.com/en/actions/reference/workflow-commands-for-github-actions#setting-an-environment-variable
           echo "BINARY_OUTPUT_PATH=${{ runner.temp }}/output" >> "$GITHUB_ENV"
           echo "SKETCHES_REPORTS_PATH=${{ runner.temp }}/sketches-reports" >> "$GITHUB_ENV"
 
       - name: Checkout repository
-        uses: actions/checkout@v2
+        uses: actions/checkout@v4
 
-      - name: Compile firmware
+      # Download arduino-cli directly as a binary, no install script needed
+      - name: Install arduino-cli
+        run: |
+          ARDUINO_CLI_VERSION="1.1.1"
+          curl -fsSL "https://github.com/arduino/arduino-cli/releases/download/v${ARDUINO_CLI_VERSION}/arduino-cli_${ARDUINO_CLI_VERSION}_Linux_64bit.tar.gz" \
+            -o arduino-cli.tar.gz
+          tar -xzf arduino-cli.tar.gz arduino-cli
+          sudo mv arduino-cli /usr/local/bin/arduino-cli
+          sudo chmod +x /usr/local/bin/arduino-cli
+          arduino-cli version
+
+      - name: Configure arduino-cli with MattairTech index
+        run: |
+          arduino-cli config init --overwrite
+          arduino-cli config add board_manager.additional_urls \
+            https://www.mattairtech.com/software/arduino/package_MattairTech_index.json
+
+      - name: Update platform index
+        run: arduino-cli core update-index
+
+      - name: Install MattairTech_Arduino:samd toolchain
+        run: arduino-cli core install MattairTech_Arduino:samd@1.6.17
+
+      - name: Compile MuxTO firmware
         uses: arduino/compile-sketches@v1
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           fqbn: ${{ matrix.board.fqbn }}
-          platforms: ${{ matrix.board.platforms }}
+          platforms: |
+            - name: MattairTech_Arduino:samd
+              source-url: https://www.mattairtech.com/software/arduino/package_MattairTech_index.json
+              version: 1.6.17
+            - name: arduino:samd
+              source-url: https://github.com/arduino/ArduinoCore-samd.git
+              version: muxto
           libraries: |
             -
           sketch-paths: |
@@ -70,14 +83,14 @@ jobs:
           sketches-report-path: ${{ env.SKETCHES_REPORTS_PATH }}
 
       - name: Save firmware binary as workflow artifact
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4
         with:
           if-no-files-found: error
           path: ${{ env.BINARY_OUTPUT_PATH }}/${{ env.BINARY_FILENAME }}
           name: ${{ env.BINARY_ARTIFACT_NAME }}
 
       - name: Save sketches report as workflow artifact
-        uses: actions/upload-artifact@v2
+        uses: actions/upload-artifact@v4
         with:
           if-no-files-found: error
           path: ${{ env.SKETCHES_REPORTS_PATH }}
@@ -87,13 +100,13 @@ jobs:
     name: Check firmware size
     needs: build
     runs-on: ubuntu-latest
+
     steps:
       - name: Download binary artifact
-        uses: actions/download-artifact@v2
+        uses: actions/download-artifact@v4
         with:
           name: ${{ env.BINARY_ARTIFACT_NAME }}
 
-      # The normal size check done by Arduino CLI is not working correctly, so it's necessary to check the size directly
       - name: Check firmware binary size
         run: |
           BINARY_SIZE="$(stat --printf="%s" "${{ github.workspace }}/${{ env.BINARY_FILENAME }}")"
