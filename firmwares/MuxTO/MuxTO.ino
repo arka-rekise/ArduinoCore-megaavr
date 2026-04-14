@@ -1,5 +1,5 @@
 /*
-   j2updi.cpp - Optimized for size
+   j2updi.cpp - No-reset USB stability fix
 */
 
 // Includes
@@ -17,7 +17,7 @@ unsigned long updi_mode_end = 0;
 uint8_t serial_mode = SERIAL_8N1;
 bool serialNeedReconfiguration = false;
 
-char support_buffer[32];  // Reduced from 64
+char support_buffer[32];
 
 struct lock q;
 
@@ -30,15 +30,16 @@ void setup() {
   JTAG2::sign_on();
 }
 
-// Lightweight USB stability fix - only 3 lines
 void loop() {
-  // Clear EORST flag if set (prevents USB issues)
+  // Proper USB stability fix - prevents "device unrecognized" WITHOUT resetting
+  // This clears the End of Reset flag which can cause USB enumeration issues
+  // Does NOT trigger NVIC_SystemReset() - no unwanted resets!
   if (USB->DEVICE.INTFLAG.bit.EORST) {
     USB->DEVICE.INTFLAG.reg = USB_DEVICE_INTFLAG_EORST;
   }
 
   if (!updi_mode) {
-    // Handle serial forwarding
+    // Serial forwarding
     if (int c = Serial1.available()) {
       lock(&q);
       if (c > Serial.availableForWrite()) c = Serial.availableForWrite();
@@ -55,19 +56,21 @@ void loop() {
       Serial1.write(support_buffer, c);
     }
 
-    // Simplified baud rate handling
+    // Handle baud rate changes
     uint32_t newBaud = Serial.baud();
     if (newBaud != baudrate) {
       baudrate = newBaud;
       if (Serial.dtr() == 1 && baudrate != 1200) {
         Serial1.end();
         Serial1.begin(baudrate, serial_mode);
+        // Reset target chip via UPDI, not the programmer itself
         UPDI::stcs(UPDI::reg::ASI_Reset_Request, UPDI::RESET_ON);
         UPDI::stcs(UPDI::reg::ASI_Reset_Request, UPDI::RESET_OFF);
       }
     }
 
-    // Enter UPDI mode
+    // Enter UPDI mode at 1200 baud - target chip reset happens here
+    // This does NOT reset the Nano Every itself, only signals UPDI mode
     if (baudrate == 1200 && Serial.dtr() == 0 && (millis() - updi_mode_end > 200)) {
       updi_mode = true;
       updi_mode_start = millis();
@@ -76,7 +79,7 @@ void loop() {
     return;
   }
 
-  // UPDI mode
+  // UPDI mode timeout protection
   if ((updi_mode_end && (millis() - updi_mode_end) > 500) || ((millis() - updi_mode_start) > 60000)) {
     updi_mode = false;
     baudrate = 115200;
